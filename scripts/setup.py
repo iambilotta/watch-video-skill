@@ -28,6 +28,7 @@ from pathlib import Path
 
 
 REQUIRED_BINARIES = ["ffmpeg", "ffprobe", "yt-dlp"]
+LOCAL_WHISPER_CANDIDATES = ("whisper-ctranslate2", "whisper")
 CONFIG_DIR = Path.home() / ".config" / "watch"
 CONFIG_FILE = CONFIG_DIR / ".env"
 ENV_TEMPLATE = """# /watch API configuration
@@ -101,6 +102,19 @@ def _have_api_key() -> tuple[bool, str | None]:
     if _read_env_key("OPENAI_API_KEY"):
         return True, "openai"
     return False, None
+
+
+def _has_local_whisper() -> str | None:
+    """Name of a local Whisper CLI if one is reachable: $WATCH_WHISPER_BIN, then PATH."""
+    override = os.environ.get("WATCH_WHISPER_BIN")
+    if override and override.strip():
+        override = override.strip()
+        if Path(override).exists() or shutil.which(override):
+            return Path(override).name
+    for name in LOCAL_WHISPER_CANDIDATES:
+        if shutil.which(name):
+            return name
+    return None
 
 
 def is_first_run() -> bool:
@@ -200,10 +214,12 @@ def _status() -> dict:
     """Structured preflight snapshot."""
     missing = _check_binaries()
     has_key, backend = _have_api_key()
+    local = _has_local_whisper()
+    has_transcription = has_key or local is not None
 
-    if not missing and has_key:
+    if not missing and has_transcription:
         status = "ready"
-    elif missing and not has_key:
+    elif missing and not has_transcription:
         status = "needs_install_and_key"
     elif missing:
         status = "needs_install"
@@ -214,8 +230,9 @@ def _status() -> dict:
         "status": status,
         "first_run": is_first_run(),
         "missing_binaries": missing,
-        "whisper_backend": backend,
+        "whisper_backend": backend or ("local" if local else None),
         "has_api_key": has_key,
+        "local_whisper": local,
         "config_file": str(CONFIG_FILE),
         "platform": platform.system(),
     }
@@ -234,11 +251,12 @@ def cmd_check() -> int:
     if s["status"] == "ready":
         return 0
 
+    no_transcription = not (s["has_api_key"] or s["local_whisper"])
     parts = []
     if s["missing_binaries"]:
         parts.append(f"missing binaries: {', '.join(s['missing_binaries'])}")
-    if not s["has_api_key"]:
-        parts.append("no Whisper API key (GROQ_API_KEY or OPENAI_API_KEY)")
+    if no_transcription:
+        parts.append("no transcription backend (a local Whisper CLI on PATH, or GROQ_API_KEY / OPENAI_API_KEY)")
     installer = Path(__file__).resolve()
     sys.stderr.write(
         f"[watch] setup incomplete ({'; '.join(parts)}). "
@@ -246,7 +264,7 @@ def cmd_check() -> int:
     )
     sys.stderr.flush()
 
-    if s["missing_binaries"] and not s["has_api_key"]:
+    if s["missing_binaries"] and no_transcription:
         return 4
     if s["missing_binaries"]:
         return 2
@@ -294,21 +312,26 @@ def cmd_install() -> int:
         print(f"[setup] config exists: {CONFIG_FILE}")
 
     has_key, backend = _have_api_key()
-    if has_key:
+    local = _has_local_whisper()
+    if has_key or local:
         _write_setup_complete()
-        print(f"[setup] ready. whisper backend: {backend}")
+        label = backend if has_key else f"local ({local})"
+        print(f"[setup] ready. transcription backend: {label}")
         if installed_deps:
             print("[setup] installed dependencies; /watch is fully set up.")
         return 0
 
     print("")
-    print("[setup] one step left: add a Whisper API key.")
+    print("[setup] one step left: enable transcription for uncaptioned videos. Either:")
     print("")
-    print(f"  Edit {CONFIG_FILE} and set either:")
-    print("    GROQ_API_KEY=...    (preferred — cheaper, faster; get one at console.groq.com/keys)")
-    print("    OPENAI_API_KEY=...  (fallback; get one at platform.openai.com/api-keys)")
+    print("  A) Install a local Whisper CLI (no API key, no per-video cost):")
+    print("       pipx install whisper-ctranslate2   (or: pipx install openai-whisper)")
     print("")
-    print("  Without a key, /watch still works but videos without captions come back frames-only.")
+    print(f"  B) Add a cloud key to {CONFIG_FILE}:")
+    print("       GROQ_API_KEY=...    (preferred — cheaper, faster; get one at console.groq.com/keys)")
+    print("       OPENAI_API_KEY=...  (fallback; get one at platform.openai.com/api-keys)")
+    print("")
+    print("  With neither, /watch still works but videos without captions come back frames-only.")
     return 3
 
 
