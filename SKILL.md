@@ -5,7 +5,7 @@ description: SLASH-COMMAND-ONLY. Invoke ONLY when the user explicitly types the 
 
 # Watch Video
 
-Claude can't stream video directly. This skill fakes it: a Python pipeline (vendored from [bradautomates/claude-video](https://github.com/bradautomates/claude-video) under `scripts/`) downloads the video, extracts auto-scaled JPEG frames with ffmpeg, pulls a timestamped transcript (native captions first, Whisper API fallback), and prints a markdown report listing every frame path. Claude then `Read`s each frame, aligns it to the spoken text, and writes a structured notes file.
+Claude can't stream video directly. This skill fakes it: a Python pipeline (vendored from [bradautomates/claude-video](https://github.com/bradautomates/claude-video) under `scripts/`) downloads the video, extracts auto-scaled JPEG frames with ffmpeg, pulls a timestamped transcript (native captions first, then a local or cloud Whisper fallback), and prints a markdown report listing every frame path. Claude then `Read`s each frame, aligns it to the spoken text, and writes a structured notes file.
 
 ## When to invoke
 
@@ -25,7 +25,7 @@ Do NOT invoke on:
 - **ffmpeg + ffprobe** on PATH — for frame and audio extraction
 - **yt-dlp** on PATH — for downloading and caption fetching
 - **Python 3.9+** — the bundled scripts use `from __future__ import annotations` so 3.9 works
-- **Optional:** Whisper API key for videos without native captions. Set `GROQ_API_KEY` (preferred — cheaper/faster, runs `whisper-large-v3`) or `OPENAI_API_KEY` in `~/.config/watch/.env`. Without one, captioned videos work fine; uncaptioned videos return frames-only.
+- **Optional:** a Whisper backend for videos without native captions. Either a **local Whisper CLI** (`pipx install whisper-ctranslate2` — GPU-capable, CPU fallback, no API key, no per-video cost; auto-detected on `PATH`), or a **cloud key** — set `GROQ_API_KEY` (preferred, cheaper/faster, runs `whisper-large-v3`) or `OPENAI_API_KEY` in `~/.config/watch/.env`. Precedence: captions → cloud key if set → local CLI. Without any backend, captioned videos work fine; uncaptioned videos return frames-only.
 
 Run `python scripts/setup.py --check` to verify dependencies, or `python scripts/setup.py` to scaffold the `.env` and check binaries. On macOS, the installer auto-installs missing binaries via Homebrew. On Linux/Windows, it prints exact install commands.
 
@@ -41,7 +41,9 @@ Flags worth knowing:
 - `--start T` / `--end T` — focus on a section (`SS`, `MM:SS`, or `HH:MM:SS`). Auto-scales fps denser inside the range. Use this for any question about a specific moment, or for any video > 10 min where the user's question is about one part.
 - `--max-frames N` — lower the cap for tighter token budget (default 80, hard max 100).
 - `--resolution W` — frame width in px (default 512; bump to 1024 only if on-screen text is unreadable).
-- `--whisper groq|openai` — force a specific Whisper backend (default: prefer Groq if both keys exist).
+- `--whisper groq|openai|local` — force a specific Whisper backend. `local` uses a Whisper CLI on the machine (default: cloud key if set, else local CLI if installed).
+- `--lang CODE` — language hint for the local backend (ISO code like `en`, `it`). Default: auto-detect. Pass it when you know the language; it improves accuracy on short or noisy audio.
+- `--whisper-model NAME` — model for the local backend (`tiny`|`base`|`small`|`medium`|`large-v3`). Default `base`. Bump to `small`/`medium` if the local transcript is weak.
 - `--no-whisper` — skip transcription entirely if no captions. Frames-only output.
 - `--out-dir DIR` — keep working files somewhere specific (default: an auto-generated tmp dir).
 
@@ -69,7 +71,7 @@ python scripts/watch.py "<source>" --start 2:15 --end 2:45
 ```
 
 The script writes everything to a tmp working directory and prints a markdown report to stdout. Capture the stdout — it contains:
-- Header (Title, Uploader, Duration, Transcript source: `captions` / `whisper (groq)` / `whisper (openai)` / `none available`)
+- Header (Title, Uploader, Duration, Transcript source: `captions` / `local whisper` / `whisper (groq)` / `whisper (openai)` / `none available`)
 - `## Frames` section with `- \`<absolute-path>\` (t=MM:SS)` lines
 - `## Transcript` section with `[MM:SS] text...` lines
 - Footer with `Work dir: <path>`
@@ -92,7 +94,7 @@ Structure the markdown like this:
 **Source:** <URL or local path>
 **Duration:** <mm:ss>
 **Uploader:** <if from YouTube>
-**Transcript source:** <captions / whisper (groq) / whisper (openai) / none>
+**Transcript source:** <captions / local whisper / whisper (groq) / whisper (openai) / none>
 
 ## One-line summary
 <≤20 words — the core claim or hook of the video>
@@ -124,7 +126,7 @@ If the user specified a non-tmp `--out-dir`, ask before deleting.
 ## Common gotchas
 
 - **YouTube Shorts / age-gated / members-only** — yt-dlp may fail. Surface its stderr verbatim; don't retry silently.
-- **No captions + no Whisper key** — the report says `Transcript: none available` and points at `setup.py`. Tell the user they can add a Groq key to `~/.config/watch/.env` for Whisper, or use `--no-whisper` for frames-only.
+- **No captions + no Whisper backend** — the report says `Transcript: none available`. Tell the user they can install a local Whisper CLI (`pipx install whisper-ctranslate2`), add a Groq key to `~/.config/watch/.env`, or use `--no-whisper` for frames-only.
 - **Local file with no audio track** — Whisper extraction errors out cleanly. Use `--no-whisper` for frames-only.
 - **Very long videos (>30 min)** — confirm with the user before running. The pipeline caps at 100 frames so the budget is bounded, but a sparse 100-frame scan of a 60-min video isn't very useful. Almost always better to run focused on the specific section.
 - **Cloudflare 403 on Groq** — `whisper.py` already sets a custom User-Agent to clear Cloudflare's default-Python-UA block. If you ever see a 403, that's the failure mode.

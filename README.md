@@ -20,7 +20,7 @@ Claude can see pictures. It cannot watch a video on its own. This skill fixes th
 
 Here is how it works:
 
-1. It pulls the transcript. If the video has captions, it uses those. If it does not, it sends the audio to Whisper. Groq is the default and OpenAI is the backup.
+1. It pulls the transcript. If the video has captions, it uses those. If it does not, it transcribes the audio with Whisper: a local Whisper CLI if you have one installed, otherwise the Groq or OpenAI cloud API.
 2. It pulls still frames from the video. Short videos get more frames, long videos get fewer. The cap is 100 frames so the token cost stays low.
 3. It matches each frame to the words said at that moment.
 4. Claude reads the frames and the transcript together. Then it writes a clean notes file with a one line summary, a TL;DR, a timeline, key quotes, and visual notes.
@@ -93,9 +93,9 @@ For Claude Desktop or Claude Agent SDK apps, clone into whatever folder that env
 - **ffmpeg + ffprobe.** [Download](https://ffmpeg.org/download.html), or use `brew install ffmpeg` on macOS, `winget install Gyan.FFmpeg` on Windows, or `apt install ffmpeg` on Linux.
 - **yt-dlp.** Use `winget install yt-dlp.yt-dlp` on Windows, `brew install yt-dlp` on macOS, or `pipx install yt-dlp` on Linux. It must be on `PATH` as a standalone binary.
 - **Python 3.9 or later.** Available on `PATH` as `python` (or `python3` on macOS and Linux). The scripts use `from __future__ import annotations`, so 3.9 works.
-- **Optional: Whisper API key.** Only needed for videos with no captions. Get a key at one of these:
-  - [Groq](https://console.groq.com/keys). Recommended. It is cheaper and faster than OpenAI. It runs `whisper-large-v3`.
-  - [OpenAI](https://platform.openai.com/api-keys). The fallback.
+- **Optional: transcription for uncaptioned videos.** Only needed when a video has no captions (every local file, and some YouTube videos). Pick either:
+  - **A local Whisper CLI (no API key, no per-video cost).** Install `whisper-ctranslate2` (recommended: it is [faster-whisper](https://github.com/Softcatala/whisper-ctranslate2), uses your GPU if present and falls back to CPU) with `pipx install whisper-ctranslate2`, or `openai-whisper` with `pipx install openai-whisper`. The skill auto-detects either on `PATH` and runs it when there is no caption and no cloud key. See "Local Whisper" below.
+  - **A cloud Whisper API key.** [Groq](https://console.groq.com/keys) (recommended, cheaper and faster, runs `whisper-large-v3`) or [OpenAI](https://platform.openai.com/api-keys) (the fallback).
 
 Run the setup wizard to create the `.env` file and check dependencies:
 
@@ -117,6 +117,29 @@ After install, invoke the skill with the slash command:
 
 The skill is set to slash-only by default. This stops it from firing by accident. If you want auto trigger instead (Claude fires the skill on any "watch this video" or video URL request), edit the `description:` line at the top of [SKILL.md](SKILL.md). There is an inline note in that file that explains how.
 
+## Local Whisper (no API key, no per-video cost)
+
+The cloud path is fast but every uncaptioned video costs an API call. If you would rather transcribe on your own machine, install a local Whisper CLI and the skill uses it automatically.
+
+```bash
+pipx install whisper-ctranslate2   # recommended: faster-whisper, GPU-capable, CPU fallback
+# or
+pipx install openai-whisper        # the reference implementation
+```
+
+Once one is on `PATH`, the transcript precedence is: **native captions → cloud key (if set) → local Whisper**. So on a machine with no cloud key, uncaptioned and local videos transcribe locally with no further setup. To force it regardless of a cloud key, pass `--whisper local`.
+
+```
+/watch-video /path/to/local/video.mp4              # auto-detects language, model "base"
+/watch-video /path/to/local/video.mp4 --lang en    # language hint for better accuracy
+```
+
+Two flags tune the local backend (both ignored by the cloud path):
+- `--lang CODE`. Language hint (ISO code like `en`, `it`). Default: auto-detect. Passing the right language noticeably improves accuracy on short or noisy audio.
+- `--whisper-model NAME`. One of `tiny`, `base`, `small`, `medium`, `large-v3`. Default `base` (fast, small download). Larger models are more accurate but slower and heavier.
+
+For a custom or non-standard Whisper CLI, set `WATCH_WHISPER_BIN` to its path; it must accept `--model`, `--output_format json`, `--output_dir`, and an optional `--language`.
+
 ## Direct CLI usage
 
 The pipeline can run on its own:
@@ -130,7 +153,9 @@ Flags:
 - `--max-frames N`. Cap on frame count. Default 80, hard max 100.
 - `--resolution W`. Frame width in pixels. Default 512.
 - `--fps F`. Override auto-fps. Capped at 2 fps.
-- `--whisper groq|openai`. Force a specific Whisper backend.
+- `--whisper groq|openai|local`. Force a specific Whisper backend. `local` uses a Whisper CLI on your machine.
+- `--lang CODE`. Language hint for the local backend (ISO code like `en`, `it`). Default: auto-detect.
+- `--whisper-model NAME`. Model for the local backend (`tiny`|`base`|`small`|`medium`|`large-v3`). Default `base`.
 - `--no-whisper`. Disable the Whisper fallback. Returns frames only if there are no captions.
 - `--out-dir DIR`. Keep working files in a specific folder. Default is a temp folder.
 
@@ -144,7 +169,7 @@ The script prints a markdown report to stdout. The report lists every frame path
 
 **yt-dlp fails on YouTube Shorts or age-gated content.** The bundled `download.py` lets yt-dlp pick its own player client. Members-only and region-locked content may still fail. yt-dlp will print a clear error when it does.
 
-**No transcript and no Whisper key.** The report will say `Transcript: none available`. Either add a Whisper key (see install above) or use `--no-whisper` for frames only.
+**No transcript and no Whisper backend.** The report will say `Transcript: none available`. Either install a local Whisper CLI (`pipx install whisper-ctranslate2`), add a cloud Whisper key (see install above), or use `--no-whisper` for frames only.
 
 **Long videos (over 10 minutes) come back sparse.** That is on purpose. The frame budget caps at 100. For dense coverage of one section, pass `--start` and `--end` to use focused mode.
 

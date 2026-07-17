@@ -31,6 +31,11 @@ GROQ_MODEL = "whisper-large-v3"
 OPENAI_ENDPOINT = "https://api.openai.com/v1/audio/transcriptions"
 OPENAI_MODEL = "whisper-1"
 
+# Local backend: a Whisper CLI on the machine, so uncaptioned videos need no API
+# key and no per-video cost. Prefers whisper-ctranslate2 (faster-whisper, GPU
+# capable), falls back to openai-whisper. Override with $WATCH_WHISPER_BIN.
+LOCAL_WHISPER_CANDIDATES = ("whisper-ctranslate2", "whisper")
+
 
 def load_api_key(preferred: str | None = None) -> tuple[str, str] | tuple[None, None]:
     """Return (backend, api_key). Prefers Groq, falls back to OpenAI.
@@ -259,6 +264,69 @@ def _segments_from_response(data: dict) -> list[dict]:
             out.append({"start": 0.0, "end": 0.0, "text": full})
 
     return out
+
+
+def resolve_local_whisper() -> str | None:
+    """Locate a local Whisper CLI: $WATCH_WHISPER_BIN first, then PATH."""
+    override = os.environ.get("WATCH_WHISPER_BIN")
+    if override and override.strip():
+        override = override.strip()
+        if Path(override).exists() or shutil.which(override):
+            return override
+    for name in LOCAL_WHISPER_CANDIDATES:
+        if shutil.which(name):
+            return name
+    return None
+
+
+def local_available() -> bool:
+    """True if a local Whisper CLI is installed."""
+    return resolve_local_whisper() is not None
+
+
+def transcribe_local(
+    video_path: str,
+    work_dir: Path,
+    language: str | None = None,
+    model: str = "base",
+) -> tuple[list[dict], str]:
+    """Transcribe with a local Whisper CLI. No network, no API key, no per-video cost.
+
+    Shells out to whisper-ctranslate2 (or openai-whisper) to emit JSON, then reuses
+    _segments_from_response so the {start, end, text} shape matches the cloud path.
+    JSON is used rather than VTT because whisper-ctranslate2 emits MM:SS.mmm stamps
+    for sub-hour clips, which the VTT parser (HH:MM:SS only) would reject.
+    """
+    binary = resolve_local_whisper()
+    if binary is None:
+        raise SystemExit(
+            "no local Whisper CLI found — install `whisper-ctranslate2` (recommended, "
+            "GPU capable) or `openai-whisper`, or set $WATCH_WHISPER_BIN to a compatible CLI"
+        )
+    work_dir.mkdir(parents=True, exist_ok=True)
+    name = Path(binary).name
+    print(f"[watch] transcribing locally via {name} (model={model}, lang={language or 'auto'})…", file=sys.stderr)
+    cmd = [binary, "--model", model, "--output_format", "json", "--output_dir", str(work_dir)]
+    if language:
+        cmd += ["--language", language]
+    cmd.append(video_path)
+    if subprocess.run(cmd).returncode != 0:
+        raise SystemExit(f"local Whisper ({name}) failed — see its output above")
+    result_json = work_dir / f"{Path(video_path).stem}.json"
+    if not result_json.exists():
+        candidates = sorted(work_dir.glob("*.json"))
+        if not candidates:
+            raise SystemExit(f"local Whisper ({name}) produced no JSON output")
+        result_json = candidates[0]
+    try:
+        data = json.loads(result_json.read_text(encoding="utf-8", errors="ignore"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"local Whisper JSON unreadable: {exc}")
+    segments = _segments_from_response(data)
+    if not segments:
+        raise SystemExit(f"local Whisper ({name}) produced an empty transcript")
+    print(f"[watch] transcribed {len(segments)} segments locally via {name}", file=sys.stderr)
+    return segments, "local"
 
 
 def transcribe_video(
